@@ -203,7 +203,7 @@ def main():
                 if (i % 50 == 0) and (GLOBAL_RANK == 0):
                     print(f"{epoch} Validation  :  {i + 1}/{len(val_loader)}  Loss:  {loss_avg/(i+1)}")
                 outputs.append(inv_transform_y(output, m0_scale).detach().cpu().numpy())
-                targets.append(target.detach().cpu().numpy())
+                targets.append(inv_transform_y(target.detach().cpu().numpy()))
 
         ###Check some condition to determine whether to save the best model
         output_dict = {}
@@ -246,7 +246,7 @@ def main():
                 loss = criterion(output, target)
                 loss_avg += loss.item()
                 outputs.append(inv_transform_y(output, m0_scale).detach().cpu().numpy())
-                targets.append(target.detach().cpu().numpy())
+                targets.append(inv_transform_y(target.detach().cpu().numpy()))
 
 
 
