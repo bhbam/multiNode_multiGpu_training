@@ -1,7 +1,7 @@
 import torch, h5py, random
 from torch.utils.data import *
 import pyarrow.parquet as pq
-
+import math
 
 '''mass transformation function: converted to network unit'''
 
@@ -70,6 +70,40 @@ class ChunkedSampler(Sampler):
 
     def __len__(self):
         return len(self.data_source)
+
+class ChunkedDistributedSampler(Sampler):
+    def __init__(self, data_source, chunk_size=3200, shuffle=False, num_replicas=None, rank=None):
+        self.data_source = data_source
+        self.chunk_size = chunk_size
+        self.num_chunks = len(data_source) // chunk_size
+        self.indices = list(range(len(data_source)))
+        self.shuffle = shuffle
+        self.num_replicas = num_replicas if num_replicas is not None else torch.distributed.get_world_size()
+        self.rank = rank if rank is not None else torch.distributed.get_rank()
+        self.num_samples = int(math.ceil(len(self.indices) * 1.0 / self.num_replicas))
+        self.total_size = self.num_samples * self.num_replicas
+
+    def shuffle_indices(self):
+        chunk_indices = [self.indices[i * self.chunk_size:(i + 1) * self.chunk_size] for i in range(self.num_chunks)]
+        random.shuffle(chunk_indices)
+        self.indices = [idx for chunk in chunk_indices for idx in chunk]
+
+    def __iter__(self):
+        if self.shuffle:
+            self.shuffle_indices()
+
+        # Ensure that all replicas have the same number of samples
+        indices = self.indices + self.indices[:(self.total_size - len(self.indices))]
+        assert len(indices) == self.total_size
+
+        # Subsample
+        offset = self.num_samples * self.rank
+        indices = indices[offset:offset + self.num_samples]
+
+        return iter(indices)
+
+    def __len__(self):
+        return self.num_samples
 
 class RegressionDataset(Dataset):
     def __init__(self, h5_path, transforms=None, preload_size=3200):

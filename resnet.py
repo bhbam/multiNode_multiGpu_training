@@ -11,6 +11,12 @@ from torchvision.models._api import register_model, Weights, WeightsEnum
 from torchvision.models._meta import _IMAGENET_CATEGORIES
 from torchvision.models._utils import _ovewrite_named_param, handle_legacy_interface
 
+import torch.nn as nn
+import torch.hub
+import torch.nn.functional as F
+
+
+
 
 __all__ = [
     "ResNet",
@@ -25,6 +31,7 @@ __all__ = [
     "Wide_ResNet50_2_Weights",
     "Wide_ResNet101_2_Weights",
     "resnet34_modified",
+    "ModifiedResNet",
 #    "resnet18",
 #    "resnet34",
 #    "resnet50",
@@ -35,6 +42,7 @@ __all__ = [
 #    "resnext101_64x4d",
 #    "wide_resnet50_2",
 #    "wide_resnet101_2",
+
 ]
 
 
@@ -731,8 +739,8 @@ class Wide_ResNet101_2_Weights(WeightsEnum):
 #    weights = ResNet34_Weights.verify(weights)
 #
 #    return _resnet(BasicBlock, [3, 4, 6, 3], weights, progress, **kwargs)
-    
-    
+
+
 def _resnet34_modified(input_channels: int, num_classes: int, block: Type[Union[BasicBlock, Bottleneck]], layers: List[int], weights: Optional[WeightsEnum], progress: bool, **kwargs: Any) -> ResNet:
     if weights is not None:
         _ovewrite_named_param(kwargs, "num_classes", len(weights.meta["categories"]))
@@ -752,6 +760,28 @@ def _resnet34_modified(input_channels: int, num_classes: int, block: Type[Union[
 def resnet34_modified(input_channels: int, num_classes: int, *, weights: Optional[ResNet34_Weights] = None, progress: bool = True, **kwargs: Any) -> ResNet:
     return _resnet34_modified(input_channels, num_classes, BasicBlock, [3, 4, 6, 3], weights, progress, **kwargs)
 
+
+class ModifiedResNet(nn.Module):
+    def __init__(self, resnet_ = 'resnet50', input_channels=13, out_channels=1):
+        super(ModifiedResNet, self).__init__()
+        # Load the ResNet-34 architecture without pre-trained weights
+        self.resnet = torch.hub.load('pytorch/vision:v0.10.0', resnet_, pretrained=False)
+
+        # Modify the first layer to accept the specified number of input channels
+        self.resnet.conv1 = nn.Conv2d(input_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
+
+        # Modify the fully connected layer for regression (assuming 1 output for mass regression)
+        out_feather = {'resnet18': 512, 'resnet34': 512, 'resnet50': 2048,'resnet101':2048, 'resnet152':2048}.get(resnet_, None)
+        self.resnet.fc = nn.Linear(out_feather, out_channels)
+
+    def forward(self, x):
+        return self.resnet(x)
+
+# ResNet18 = ModifiedResNet(resnet_='resnet18',input_channels=13)
+# ResNet34 = ModifiedResNet(resnet_='resnet34',input_channels=13)
+# ResNet50 = ModifiedResNet(resnet_='resnet50',input_channels=13)
+# ResNet101 = ModifiedResNet(resnet_='resnet101',input_channels=13)
+# ResNet152 = ModifiedResNet(resnet_='resnet152',input_channels=13)
 
 #@register_model()
 #@handle_legacy_interface(weights=("pretrained", ResNet50_Weights.IMAGENET1K_V1))
