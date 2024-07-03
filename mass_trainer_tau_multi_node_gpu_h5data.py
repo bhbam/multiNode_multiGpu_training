@@ -12,6 +12,9 @@ import torch.optim as optim
 from torch.utils.data import Dataset, ConcatDataset
 import wandb
 from dataset_loader import *
+from grokfast import gradfilter_ma, gradfilter_ema
+alpha = 0.98
+lamb = 2.0
 
 run_logger = True
 
@@ -88,15 +91,16 @@ def main():
         print("Number of val set  :  ", n_total_valid)
 
 
-    train_sampler = ChunkedSampler(train_indices, chunk_size=BATCH_SIZE, shuffle=True)
+    train_sampler = ChunkedDistributedSampler(train_indices, chunk_size=BATCH_SIZE, shuffle=True, num_replicas=None, rank=None)
     train_loader = DataLoader(train_dset, batch_size=BATCH_SIZE, sampler=train_sampler, pin_memory=True, num_workers=args.num_workers)
 
-    val_sampler = ChunkedSampler(valid_indices, chunk_size=BATCH_SIZE, shuffle=False)
+    val_sampler = ChunkedDistributedSampler(valid_indices, chunk_size=BATCH_SIZE, shuffle=False, num_replicas=None, rank=None)
     val_loader = DataLoader(valid_dset, batch_size=BATCH_SIZE, sampler=val_sampler, pin_memory=True, num_workers=args.num_workers)
 
     criterion = nn.BCEWithLogitsLoss().to(device)
 
-    model = resnet34_modified(input_channels=len(indices), num_classes=1)
+    # model = resnet34_modified(input_channels=len(indices), num_classes=1)
+    model = ModifiedResNet(resnet_='resnet50',input_channels=len(indices))
     model = model.to(device)
 
     ddp_model = nn.parallel.DistributedDataParallel(model, device_ids=[device], output_device=device)
@@ -144,6 +148,7 @@ def main():
     def train(epochs, optimizer):
         best_loss = 100
         best_epoch = 0
+        grads = None
         for ep in range( epochs):
             epoch = ep + 1 + args.resume_epoch_num
             ddp_model.train()
@@ -151,19 +156,16 @@ def main():
                 print('Epoch #', epoch )
             loss_avg = 0
             # train_loader.sampler.set_epoch(epoch)
-            # print("Just before train loop -----------------")
             for i, sample in enumerate(train_loader):
-                # print(f"after {i}  train iteration -----------------")
                 if args.cuda:
                     data, target = sample[0].to(device), sample[1].to(device)
                 with torch.no_grad():
                     target = transform_y(target, m0_scale)
                 optimizer.zero_grad()
                 output = ddp_model(data)
-                # print(f"after {i}  passing data to model -----------------")
                 loss = criterion(output, target)
                 loss.backward()
-                # print(f"after {i}  backward propagration -----------------")
+                grads = gradfilter_ema(ddp_model, grads=grads, alpha=alpha, lamb=lamb)
                 loss_avg += loss.item()
                 optimizer.step()
 
@@ -171,11 +173,10 @@ def main():
                     scheduler.step()
                 if (i % 50 == 0) and (GLOBAL_RANK == 0):
                     print(f"{epoch} Train  :  {i+1}/{len(train_loader)}  Loss:  {loss_avg/(i+1)}")
-
+                    if WandB_: wandb.log({"Train_loss": loss_avg/(i+1)})
             if GLOBAL_RANK == 0:
 
                 print('Epoch #:', epoch, 'Avg Train Loss: ', loss_avg/(i+1))
-                # wandb.log({"Train_loss": loss_avg/(i+1)})
                 ###Add save checkpoints
                 os.makedirs(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr,exist_ok=True)
                 checkpoint_format = os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr + f'/ckpt_{epoch}.pt'
@@ -202,8 +203,9 @@ def main():
                 loss_avg += loss.item()
                 if (i % 50 == 0) and (GLOBAL_RANK == 0):
                     print(f"{epoch} Validation  :  {i + 1}/{len(val_loader)}  Loss:  {loss_avg/(i+1)}")
+                    if WandB_: wandb.log({"valid_loss": loss_avg/(i+1)})
                 outputs.append(inv_transform_y(output, m0_scale).detach().cpu().numpy())
-                targets.append(inv_transform_y(target.detach().cpu().numpy()))
+                targets.append(inv_transform_y(target, m0_scale).detach().cpu().numpy())
 
         ###Check some condition to determine whether to save the best model
         output_dict = {}
@@ -220,7 +222,7 @@ def main():
             if (loss_avg/(i+1)) < best_loss:
                 best_loss = (loss_avg/(i+1))
                 best_epoch = epoch
-            # wandb.log({"valid_loss": loss_avg/(i+1)})
+
 
 
         return best_epoch, best_loss
@@ -246,7 +248,7 @@ def main():
                 loss = criterion(output, target)
                 loss_avg += loss.item()
                 outputs.append(inv_transform_y(output, m0_scale).detach().cpu().numpy())
-                targets.append(inv_transform_y(target.detach().cpu().numpy()))
+                targets.append(inv_transform_y(target, m0_scale).detach().cpu().numpy())
 
 
 
@@ -254,7 +256,7 @@ def main():
                     print(f"Test  :  {i + 1}/{len(test_loader)}  Loss:  {loss_avg/(i+1)}")
 
 
-            # wandb.log({"valid_loss": loss_avg/(i+1)})
+                    if WandB_: wandb.log({"valid_loss": loss_avg/(i+1)})
 
             global_rank = dist.get_rank()
             output_dict = {}
@@ -326,6 +328,7 @@ if __name__ == '__main__':
     parser.add_argument('--m0_scale', type=float, default=17.2)
     parser.add_argument('-b', '--resblocks',  default=2,     type=int, help='Number of residual blocks.')
     parser.add_argument('-ch','--channels', nargs='+', type=int, default=[0,1,2,3,4,5,6,7,8,9,10,11,12], help='List of channels used')
+    parser.add_argument('--WandB', type=bool, default=False, help='flag for wandb')
     args = parser.parse_args()
 
     BATCH_SIZE = args.batch_size
@@ -333,6 +336,7 @@ if __name__ == '__main__':
     n_valid = args.n_valid
     m0_scale = args.m0_scale
     data_path = args.data_path
+    WandB_ = args.WandB
     channel_list = ["Tracks_pt", "Tracks_dZSig", "Tracks_d0Sig", "ECAL_energy","HBHE_energy", "Pix_1", "Pix_2", "Pix_3", "Pix_4", "Tib_1", "Tib_2" ,"Tob_1", "Tob_2"]
 
     indices = args.channels # channel selected for training change it to class defination too
@@ -368,11 +372,11 @@ if __name__ == '__main__':
     print('timestamp: ' + timestr)
     m0_scale = torch.tensor(m0_scale)
 
-
-    # wandb.login(key="51b58a76963008d6010f73edbd6d0617a772c9df")
-    # wandb.init(
-    #     project = "Boosted Tau classifier",
-    #     name = "ResNet_based_Model"
-    # )
+    if WandB_:
+        wandb.login(key="51b58a76963008d6010f73edbd6d0617a772c9df")
+        wandb.init(
+            project = f"Mass Regression using gpu {WORLD_SIZE}",
+            name = f"resnet50_{WORLD_SIZE}"
+        )
     main()
-    # wandb.finish()
+    if WandB_: wandb.finish()
