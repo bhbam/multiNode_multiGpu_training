@@ -5,11 +5,11 @@ import pyarrow.parquet as pq
 from resnet import *
 import torch
 from torch import distributed as dist
-from torch.utils.data.distributed import DistributedSampler
+# from torch.utils.data.distributed import DistributedSampler
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import Dataset, ConcatDataset
+# from torch.utils.data import Dataset, ConcatDataset
 import wandb
 from dataset_loader import *
 from grokfast import gradfilter_ma, gradfilter_ema
@@ -65,11 +65,14 @@ def main():
 
     file_train = glob.glob(f'{data_path}/*train*')[0]
     file_valid = glob.glob(f'{data_path}/*valid*')[0]
+    if run_test: file_test = glob.glob(f'{test_data_path}/*M3p7*')[0]
 
     train_dset = RegressionDataset(file_train, preload_size=BATCH_SIZE)
     valid_dset = RegressionDataset(file_valid, preload_size=BATCH_SIZE)
+    if run_test: test_dset = RegressionDataset(file_test, preload_size=BATCH_SIZE)
     n_total_train = len(train_dset)
     n_total_valid = len(valid_dset)
+    if run_test: n_total_test = len(test_dset)
 
     if n_train != -1:
         train_indices = list(range(n_train))
@@ -84,11 +87,19 @@ def main():
     else:
         valid_indices = list(range(n_total_valid))
         random.shuffle(valid_indices)
+    if run_test:
+        if n_test !=-1:
+            test_indices = list(range(n_test))
+            random.shuffle(test_indices)
+        else:
+            test_indices = list(range(n_total_test))
+            random.shuffle(test_indices)
 
 
     if GLOBAL_RANK==0:
-        print("Number of train set:  ", n_total_train)
-        print("Number of val set  :  ", n_total_valid)
+        print("Number of train sets  :  ", n_total_train, "   used train sets:  ", len(train_indices),"---->", (len(train_indices)/n_total_train)*100,"%")
+        print("Number of val sets    :  ", n_total_valid, "   used valid sets:  ", len(valid_indices),"---->", (len(valid_indices)/n_total_valid)*100,"%")
+        if run_test: print("Number of test sets  :  ", n_total_test, "  used test sets:  ", len(test_indices),"---->", (len(test_indices)/n_total_test)*100,"%")
 
 
     train_sampler = ChunkedDistributedSampler(train_indices, chunk_size=BATCH_SIZE, shuffle=True, num_replicas=None, rank=None)
@@ -96,18 +107,22 @@ def main():
 
     val_sampler = ChunkedDistributedSampler(valid_indices, chunk_size=BATCH_SIZE, shuffle=False, num_replicas=None, rank=None)
     val_loader = DataLoader(valid_dset, batch_size=BATCH_SIZE, sampler=val_sampler, pin_memory=True, num_workers=args.num_workers)
+    if run_test:
+        test_sampler = ChunkedDistributedSampler(test_indices, chunk_size=BATCH_SIZE, shuffle=False, num_replicas=None, rank=None)
+        test_loader = DataLoader(test_dset, batch_size=BATCH_SIZE, sampler=test_sampler, pin_memory=True, num_workers=args.num_workers)
+    
+    # criterion = nn.BCEWithLogitsLoss().to(device)
+    criterion = nn.MSELoss().to(device)
 
-    criterion = nn.BCEWithLogitsLoss().to(device)
-
-    # model = resnet34_modified(input_channels=len(indices), num_classes=1)
-    model = ModifiedResNet(resnet_='resnet50',input_channels=len(indices))
+    model = resnet34_modified(input_channels=len(indices), num_classes=1)
+    # model = ModifiedResNet(resnet_='resnet18',input_channels=len(indices))
     model = model.to(device)
 
     ddp_model = nn.parallel.DistributedDataParallel(model, device_ids=[device], output_device=device)
 
 
     if args.resume_epoch_num !=0:
-        model_to_load = glob.glob(f"{os.environ['SCRATCH']}/{args.checkpoint_folder}/{decay}_*/ckpt_{args.resume_epoch_num}.pt")[0]
+        model_to_load = glob.glob(f"{os.environ['SCRATCH']}/{args.checkpoint_folder}/{decay}_*/Models/ckpt_{args.resume_epoch_num}.pt")[0]
         old_checkpoint = torch.load(model_to_load)
         if GLOBAL_RANK == 0: print("---------> Loaded pretrained Model---",model_to_load)
         ddp_model.load_state_dict(old_checkpoint['model_state_dict'])
@@ -145,7 +160,7 @@ def main():
     scheduler = WarmupScheduler(optimizer, warmup_epochs=args.warmup, total_epochs=args.epochs,
                                 num_batches_per_epoch=num_batches_per_epoch)
 
-    def train(epochs, optimizer):
+    def train(epochs, optimizer, WandB_):
         best_loss = 100
         best_epoch = 0
         grads = None
@@ -160,7 +175,7 @@ def main():
                 if args.cuda:
                     data, target = sample[0].to(device), sample[1].to(device)
                 with torch.no_grad():
-                    target = transform_y(target, m0_scale)
+                    target = transform_norm_y(target, mean_, std_)
                 optimizer.zero_grad()
                 output = ddp_model(data)
                 loss = criterion(output, target)
@@ -173,22 +188,22 @@ def main():
                     scheduler.step()
                 if (i % 50 == 0) and (GLOBAL_RANK == 0):
                     print(f"{epoch} Train  :  {i+1}/{len(train_loader)}  Loss:  {loss_avg/(i+1)}")
-                    if WandB_: wandb.log({"Train_loss": loss_avg/(i+1)})
+                    # if WandB_: wandb.log({"Train_loss": loss_avg/(i+1)})
             if GLOBAL_RANK == 0:
 
                 print('Epoch #:', epoch, 'Avg Train Loss: ', loss_avg/(i+1))
                 ###Add save checkpoints
-                os.makedirs(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr,exist_ok=True)
-                checkpoint_format = os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr + f'/ckpt_{epoch}.pt'
+                os.makedirs(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr+f'_GPUS_{WORLD_SIZE}'+'/Models',exist_ok=True)
+                checkpoint_format = os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr+ f'_GPUS_{WORLD_SIZE}'+'/Models'+ f'/ckpt_{epoch}.pt'
                 model_dict = {'model_state_dict': ddp_model.state_dict()}
                 torch.save(model_dict, checkpoint_format)
                 print('---------------Start validation--------------')
 
-            best_epoch, best_loss= validate(epoch, best_epoch, best_loss)
+            best_epoch, best_loss= validate(epoch, best_epoch, best_loss, WandB_)
         return best_epoch
 
 
-    def validate(epoch, best_epoch, best_loss):
+    def validate(epoch, best_epoch, best_loss, WandB_):
         ddp_model.eval()
         loss_avg = 0
         outputs = []
@@ -197,39 +212,42 @@ def main():
             for i, sample in enumerate(val_loader):
                 if args.cuda:
                     data, target = sample[0].to(device), sample[1].to(device)
-                target = transform_y(target, m0_scale)
+                target = transform_norm_y(target, mean_, std_)
                 output = ddp_model(data)
                 loss = criterion(output, target)
                 loss_avg += loss.item()
                 if (i % 50 == 0) and (GLOBAL_RANK == 0):
                     print(f"{epoch} Validation  :  {i + 1}/{len(val_loader)}  Loss:  {loss_avg/(i+1)}")
-                    if WandB_: wandb.log({"valid_loss": loss_avg/(i+1)})
-                outputs.append(inv_transform_y(output, m0_scale).detach().cpu().numpy())
-                targets.append(inv_transform_y(target, m0_scale).detach().cpu().numpy())
+                    # if WandB_: wandb.log({"valid_loss": loss_avg/(i+1)})
+                outputs.append(inv_transform_norm_y(output, mean_, std_).detach().cpu().numpy())
+                targets.append(inv_transform_norm_y(target, mean_, std_).detach().cpu().numpy())
 
         ###Check some condition to determine whether to save the best model
         output_dict = {}
         output_dict["m_true"] = np.concatenate(targets)
         output_dict["m_pred"] = np.concatenate(outputs)
         global_rank = dist.get_rank()
-        os.makedirs(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_'+ timestr+f'/valid_data_epoch_{epoch}/',exist_ok=True)
-        with open(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_'+ timestr+f'/valid_data_epoch_{epoch}/'+f'Inference_data_valid_rank_{global_rank}_epoch_{epoch}.pkl', "wb") as outfile:
+        os.makedirs(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_'+ timestr+f'_GPUS_{WORLD_SIZE}'+f'/valid_data_epoch_{epoch}/',exist_ok=True)
+        with open(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_'+ timestr+f'_GPUS_{WORLD_SIZE}'+f'/valid_data_epoch_{epoch}/'+f'Inference_data_valid_rank_{global_rank}_epoch_{epoch}.pkl', "wb") as outfile:
               pickle.dump(output_dict, outfile, protocol=2)
 
         # dist.barrier()
         if GLOBAL_RANK == 0:
             print('Epoch #:', epoch, 'Avg Valid Loss: ', loss_avg/(i+1))
-            if (loss_avg/(i+1)) < best_loss:
-                best_loss = (loss_avg/(i+1))
-                best_epoch = epoch
+        if (loss_avg/(i+1)) < best_loss:
+            best_loss = (loss_avg/(i+1))
+            best_epoch = epoch
 
 
 
         return best_epoch, best_loss
 
-    def test(best_epoch_, device, WORLD_SIZE):
-        # itos = output_vocab.get_itos()
-        model_to_load = glob.glob(f"{os.environ['SCRATCH']}/{args.checkpoint_folder}/{decay}_*/ckpt_{best_epoch_}.pt")[0]
+    def test(best_epoch, device, WORLD_SIZE, WandB_):
+        if GLOBAL_RANK == 0: 
+            print("best_epoch  ", best_epoch)
+
+        model_to_load = glob.glob(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr+ f'_GPUS_{WORLD_SIZE}'+'/Models'+ f'/ckpt_{best_epoch}.pt')[0]
+        
         old_checkpoint = torch.load(model_to_load)
         if GLOBAL_RANK == 0: print("---------> Loaded Best Model---",model_to_load)
         ddp_model.load_state_dict(old_checkpoint['model_state_dict'])
@@ -240,15 +258,15 @@ def main():
         with torch.no_grad():
         ###Drop in your test loop here but note that each GPU will report the test results independently
         ###if you construct the test loop the same way as train/val
-            for i, sample in enumerate(val_loader):
+            for i, sample in enumerate(test_loader):
                 if args.cuda:
                     data, target = sample[0].to(device), sample[1].to(device)
-                target = transform_y(target, m0_scale)
+                target = transform_norm_y(target, mean_, std_)
                 output = ddp_model(data)
                 loss = criterion(output, target)
                 loss_avg += loss.item()
-                outputs.append(inv_transform_y(output, m0_scale).detach().cpu().numpy())
-                targets.append(inv_transform_y(target, m0_scale).detach().cpu().numpy())
+                outputs.append(inv_transform_norm_y(output, mean_, std_).detach().cpu().numpy())
+                targets.append(inv_transform_norm_y(target, mean_, std_).detach().cpu().numpy())
 
 
 
@@ -256,21 +274,21 @@ def main():
                     print(f"Test  :  {i + 1}/{len(test_loader)}  Loss:  {loss_avg/(i+1)}")
 
 
-                    if WandB_: wandb.log({"valid_loss": loss_avg/(i+1)})
+                    # if WandB_: wandb.log({"valid_loss": loss_avg/(i+1)})
 
             global_rank = dist.get_rank()
             output_dict = {}
             output_dict["m_true"] = np.concatenate(targets)
             output_dict["m_pred"] = np.concatenate(outputs)
             global_rank = dist.get_rank()
-            os.makedirs(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr + f'/test_data_epoch_{best_epoch}/',exist_ok=True)
-            with open(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_'+timestr+ f'/test_data_epoch_{best_epoch}/'+f'/Inference_data_test_rank_{global_rank}_epoch_{best_epoch_}.pkl', "wb") as outfile:
+            os.makedirs(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr+f'_GPUS_{WORLD_SIZE}'+ f'/test_data_epoch_{best_epoch}/',exist_ok=True)
+            with open(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_'+timestr +f'_GPUS_{WORLD_SIZE}'+ f'/test_data_epoch_{best_epoch}/'+f'/Inference_data_test_rank_{global_rank}_epoch_{best_epoch}_M3p7.pkl', "wb") as outfile:
                 pickle.dump(output_dict, outfile, protocol=2)
-            with open(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr + f'/output_file_globalrank_{global_rank}_epoch_{best_epoch_}.txt', 'a') as w:
+            with open(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr+f'_GPUS_{WORLD_SIZE}' + f'/output_file_globalrank_{global_rank}_epoch_{best_epoch}.txt', 'a') as w:
                 w.write('Model: ' + model_to_load + ' \n')
                 # w.write('Acc: %f \n', accuracy)
                 w.write('Loss:  ' + f"{loss_avg/(i+1)}"+ ' \n')
-                w.write('Numsamples: ' + f"{len(test_loader.dataset) // WORLD_SIZE // args.batch_size * WORLD_SIZE * args.batch_size}")
+                w.write('Numsamples: ' + f"{len(test_loader) // WORLD_SIZE // args.batch_size * WORLD_SIZE * args.batch_size}")
         print("------End testing-----")
 
 
@@ -278,18 +296,14 @@ def main():
     ###Drop in your loss function
 
     ###Get your best epoch after training so you can use it to load the appropriate model for testing
-    best_epoch = train(args.epochs, optimizer)
+    best_epoch = train(args.epochs, optimizer, WandB_ )
     global_rank = dist.get_rank()
-    print(f"best_epoch before synchronization global_rank--{global_rank}------------",best_epoch)
-    best_epoch_for_test = best_epoch
-    if global_rank == 0:
-        print('-------------Starting Testing----------------')
-        # dist.broadcast(torch.tensor(best_epoch_for_test, dtype=torch.int).to(device), src=0)
-        # print(f"----before barrier. Global rank: {global_rank}")
-        # dist.barrier()
-        # print(f"----after barrier. Global rank: {global_rank}")
-        # print(f"best_epoch_for_test-------global_rank--{global_rank}-------",best_epoch_for_test)
-        test(best_epoch_for_test, device, WORLD_SIZE)
+    if GLOBAL_RANK == 0: print(f"best_epoch before synchronization global_rank--{global_rank}------------",best_epoch)
+    
+    if run_test:
+        if GLOBAL_RANK == 0: print('-------------Starting Testing----------------')
+        
+        test(best_epoch, device, WORLD_SIZE, WandB_)
 
     sys.exit()
 
@@ -297,7 +311,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--log_dir', default='', ###Replace with your log dir
                         help='log directory')
-    parser.add_argument('--data_path', default='/pscratch/sd/b/bbbam/mass_regression_train_valid_data_H5', ###Replace with your log dir
+    parser.add_argument('--data_path', default='/pscratch/sd/b/bbbam/normalized_nan_replaced_m1p2To17p2_massreg_samples_chunksize_32_h5', 
+                        help='log directory')
+    parser.add_argument('--test_data_path', default='/pscratch/sd/b/bbbam/signal_with_trigger_normalized_h5', 
                         help='log directory')
     parser.add_argument('--batch_size', type=int, default=1024, ###With DDP, set this as high as possible
                         help='input batch size for training')
@@ -305,6 +321,8 @@ if __name__ == '__main__':
                         help='number of training sample -1 to use all')
     parser.add_argument('--n_valid', type=int, default=-1,
                         help='number of validation sample -1 to use all')
+    parser.add_argument('--n_test', type=int, default=-1,
+                        help='number of testing sample -1 to use all')
     parser.add_argument('--epochs', type=int, default=100, ###Tune to your problem
                         help='number of epochs to train')
     parser.add_argument('--base_lr', type=float, default=0.001, ###Tune to your problem
@@ -329,16 +347,20 @@ if __name__ == '__main__':
     parser.add_argument('-b', '--resblocks',  default=2,     type=int, help='Number of residual blocks.')
     parser.add_argument('-ch','--channels', nargs='+', type=int, default=[0,1,2,3,4,5,6,7,8,9,10,11,12], help='List of channels used')
     parser.add_argument('--WandB', type=bool, default=False, help='flag for wandb')
+    parser.add_argument('--run_test', type=bool, default=False, help='flag for running test on signal samples')
     args = parser.parse_args()
 
     BATCH_SIZE = args.batch_size
     n_train = args.n_train
     n_valid = args.n_valid
+    n_test = args.n_test
     m0_scale = args.m0_scale
     data_path = args.data_path
+    test_data_path = args.test_data_path
     WandB_ = args.WandB
+    run_test = args.run_test
     channel_list = ["Tracks_pt", "Tracks_dZSig", "Tracks_d0Sig", "ECAL_energy","HBHE_energy", "Pix_1", "Pix_2", "Pix_3", "Pix_4", "Tib_1", "Tib_2" ,"Tob_1", "Tob_2"]
-
+    mean_, std_ = 8.893934, 4.4611673
     indices = args.channels # channel selected for training change it to class defination too
     channels_used = [channel_list[ch] for ch in indices]
     layers_names = ' | '.join(channels_used)
@@ -372,11 +394,11 @@ if __name__ == '__main__':
     print('timestamp: ' + timestr)
     m0_scale = torch.tensor(m0_scale)
 
-    if WandB_:
-        wandb.login(key="51b58a76963008d6010f73edbd6d0617a772c9df")
-        wandb.init(
-            project = f"Mass Regression using gpu {WORLD_SIZE}",
-            name = f"resnet50_{WORLD_SIZE}"
-        )
+    # if WandB_:
+        # wandb.login(key="51b58a76963008d6010f73edbd6d0617a772c9df")
+        # wandb.init(
+        #     project = f"Mass Regression using gpu {WORLD_SIZE}",
+        #     name = f"resnet34_modified_gpu_{WORLD_SIZE}"
+        # )
     main()
-    if WandB_: wandb.finish()
+    # if WandB_: wandb.finish()
