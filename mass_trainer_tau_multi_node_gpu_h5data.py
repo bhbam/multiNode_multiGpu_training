@@ -15,11 +15,7 @@ from dataset_loader import *
 from grokfast import gradfilter_ma, gradfilter_ema
 alpha = 0.98
 lamb = 2.0
-
 run_logger = True
-
-
-
 
 def logger(s):
     global f, run_logger
@@ -42,6 +38,7 @@ def set_random_seeds(random_seed=0):
 
 
 def main():
+
     def _get_sync_file():
         """Logic for naming sync file using slurm env variables"""
         sync_file_dir = '%s/pytorch-sync-files' % os.environ['SCRATCH']
@@ -50,91 +47,7 @@ def main():
                 sync_file_dir, os.environ['SLURM_JOB_ID'], os.environ['SLURM_STEP_ID'])
         return sync_file
 
-    sync_file = _get_sync_file()
-
-    dist.init_process_group(backend=args.backend, world_size=WORLD_SIZE, rank=GLOBAL_RANK, init_method=sync_file)
-
-
-    args.cuda = not args.no_cuda and torch.cuda.is_available()
-
-
-    set_random_seeds(random_seed=args.seed)
-
-    ###Drop in your train, validation, and test datasets of type Dataset
-    ###The drop_last=True is necessary to ensure each gpu sees the same amount of data
-
-    file_train = glob.glob(f'{data_path}/*train*')[0]
-    file_valid = glob.glob(f'{data_path}/*valid*')[0]
-    if run_test: file_test = glob.glob(f'{test_data_path}/*M3p7*')[0]
-
-    train_dset = RegressionDataset(file_train, preload_size=BATCH_SIZE)
-    valid_dset = RegressionDataset(file_valid, preload_size=BATCH_SIZE)
-    if run_test: test_dset = RegressionDataset(file_test, preload_size=BATCH_SIZE)
-    n_total_train = len(train_dset)
-    n_total_valid = len(valid_dset)
-    if run_test: n_total_test = len(test_dset)
-
-    if n_train != -1:
-        train_indices = list(range(n_train))
-        random.shuffle(train_indices)
-    else:
-        train_indices = list(range(n_total_train))
-        random.shuffle(train_indices)
-
-    if n_valid !=-1:
-        valid_indices = list(range(n_valid))
-        random.shuffle(valid_indices)
-    else:
-        valid_indices = list(range(n_total_valid))
-        random.shuffle(valid_indices)
-    if run_test:
-        if n_test !=-1:
-            test_indices = list(range(n_test))
-            random.shuffle(test_indices)
-        else:
-            test_indices = list(range(n_total_test))
-            random.shuffle(test_indices)
-
-
-    if GLOBAL_RANK==0:
-        print("Number of train sets  :  ", n_total_train, "   used train sets:  ", len(train_indices),"---->", (len(train_indices)/n_total_train)*100,"%")
-        print("Number of val sets    :  ", n_total_valid, "   used valid sets:  ", len(valid_indices),"---->", (len(valid_indices)/n_total_valid)*100,"%")
-        if run_test: print("Number of test sets  :  ", n_total_test, "  used test sets:  ", len(test_indices),"---->", (len(test_indices)/n_total_test)*100,"%")
-
-
-    train_sampler = ChunkedDistributedSampler(train_indices, chunk_size=BATCH_SIZE, shuffle=True, num_replicas=None, rank=None)
-    train_loader = DataLoader(train_dset, batch_size=BATCH_SIZE, sampler=train_sampler, pin_memory=True, num_workers=args.num_workers)
-
-    val_sampler = ChunkedDistributedSampler(valid_indices, chunk_size=BATCH_SIZE, shuffle=False, num_replicas=None, rank=None)
-    val_loader = DataLoader(valid_dset, batch_size=BATCH_SIZE, sampler=val_sampler, pin_memory=True, num_workers=args.num_workers)
-    if run_test:
-        test_sampler = ChunkedDistributedSampler(test_indices, chunk_size=BATCH_SIZE, shuffle=False, num_replicas=None, rank=None)
-        test_loader = DataLoader(test_dset, batch_size=BATCH_SIZE, sampler=test_sampler, pin_memory=True, num_workers=args.num_workers)
     
-    # criterion = nn.BCEWithLogitsLoss().to(device)
-    criterion = nn.MSELoss().to(device)
-
-    model = resnet34_modified(input_channels=len(indices), num_classes=1)
-    # model = ModifiedResNet(resnet_='resnet18',input_channels=len(indices))
-    model = model.to(device)
-
-    ddp_model = nn.parallel.DistributedDataParallel(model, device_ids=[device], output_device=device)
-
-
-    if args.resume_epoch_num !=0:
-        model_to_load = glob.glob(f"{os.environ['SCRATCH']}/{args.checkpoint_folder}/{decay}_*/Models/ckpt_{args.resume_epoch_num}.pt")[0]
-        old_checkpoint = torch.load(model_to_load)
-        if GLOBAL_RANK == 0: print("---------> Loaded pretrained Model---",model_to_load)
-        ddp_model.load_state_dict(old_checkpoint['model_state_dict'])
-
-        # map_location = {"cuda:0": "cuda:{}".format(LOCAL_RANK)}
-        # ddp_model.load_state_dict(torch.load(args.resume, map_location=map_location))
-
-    ###Can replace with optimizer of your choice
-    optimizer = torch.optim.Adam(ddp_model.parameters(),
-                                 lr=args.base_lr*WORLD_SIZE,
-                                 eps=args.epsilon,
-                                )
 
     ###The more gpus you scale to, the less stable the training unless you use this type of scheduler.
     ###It first, increases the learning rate linearly then decreases it like a decaying exponential.
@@ -154,12 +67,7 @@ def main():
                     ((self.total_epochs - self.warmup_epochs) * self.num_batches_per_epoch)) for base_lr in self.base_lrs]
                 return lr
 
-    ###This part determines the appropriate number of batches per epoch.
-    ###Each gpu will see the same amount of data between using this and using drop_last=True in the loaders
-    num_batches_per_epoch = len(train_loader.dataset) // WORLD_SIZE // args.batch_size
-    scheduler = WarmupScheduler(optimizer, warmup_epochs=args.warmup, total_epochs=args.epochs,
-                                num_batches_per_epoch=num_batches_per_epoch)
-
+   
     def train(epochs, optimizer, WandB_):
         best_loss = 100
         best_epoch = 0
@@ -170,16 +78,21 @@ def main():
             if GLOBAL_RANK == 0:
                 print('Epoch #', epoch )
             loss_avg = 0
-            # train_loader.sampler.set_epoch(epoch)
             for i, sample in enumerate(train_loader):
                 if args.cuda:
                     data, target = sample[0].to(device), sample[1].to(device)
                 with torch.no_grad():
-                    target = transform_norm_y(target, mean_, std_)
+                    target = transform_norm_y(target, mass_mean, mass_std)
                 optimizer.zero_grad()
                 output = ddp_model(data)
                 loss = criterion(output, target)
                 loss.backward()
+
+                for param in ddp_model.parameters():
+                    if param.grad is not None:
+                        dist.all_reduce(param.grad.data, op=dist.ReduceOp.SUM)
+                        param.grad.data /= WORLD_SIZE
+
                 grads = gradfilter_ema(ddp_model, grads=grads, alpha=alpha, lamb=lamb)
                 loss_avg += loss.item()
                 optimizer.step()
@@ -188,13 +101,13 @@ def main():
                     scheduler.step()
                 if (i % 50 == 0) and (GLOBAL_RANK == 0):
                     print(f"{epoch} Train  :  {i+1}/{len(train_loader)}  Loss:  {loss_avg/(i+1)}")
-                    # if WandB_: wandb.log({"Train_loss": loss_avg/(i+1)})
+                    if WandB_: wandb.log({"Train_loss": loss_avg/(i+1)})
             if GLOBAL_RANK == 0:
 
                 print('Epoch #:', epoch, 'Avg Train Loss: ', loss_avg/(i+1))
                 ###Add save checkpoints
-                os.makedirs(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr+f'_GPUS_{WORLD_SIZE}'+'/Models',exist_ok=True)
-                checkpoint_format = os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr+ f'_GPUS_{WORLD_SIZE}'+'/Models'+ f'/ckpt_{epoch}.pt'
+                os.makedirs(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}_Nodes_{WORLD_SIZE/4}/{decay}_' + timestr+f'_GPUS_{WORLD_SIZE}'+'/Models',exist_ok=True)
+                checkpoint_format = os.environ['SCRATCH'] + f'/{args.checkpoint_folder}_Nodes_{WORLD_SIZE/4}/{decay}_' + timestr+ f'_GPUS_{WORLD_SIZE}'+'/Models'+ f'/ckpt_{epoch}.pt'
                 model_dict = {'model_state_dict': ddp_model.state_dict()}
                 torch.save(model_dict, checkpoint_format)
                 print('---------------Start validation--------------')
@@ -212,23 +125,28 @@ def main():
             for i, sample in enumerate(val_loader):
                 if args.cuda:
                     data, target = sample[0].to(device), sample[1].to(device)
-                target = transform_norm_y(target, mean_, std_)
+                target = transform_norm_y(target, mass_mean, mass_std)
                 output = ddp_model(data)
                 loss = criterion(output, target)
                 loss_avg += loss.item()
                 if (i % 50 == 0) and (GLOBAL_RANK == 0):
                     print(f"{epoch} Validation  :  {i + 1}/{len(val_loader)}  Loss:  {loss_avg/(i+1)}")
-                    # if WandB_: wandb.log({"valid_loss": loss_avg/(i+1)})
-                outputs.append(inv_transform_norm_y(output, mean_, std_).detach().cpu().numpy())
-                targets.append(inv_transform_norm_y(target, mean_, std_).detach().cpu().numpy())
+                    if WandB_: wandb.log({"valid_loss": loss_avg/(i+1)})
+                outputs.append(inv_transform_norm_y(output, mass_mean, mass_std).detach().cpu().numpy())
+                targets.append(inv_transform_norm_y(target, mass_mean, mass_std).detach().cpu().numpy())
+
+        # Collect loss across all devices
+        total_loss_tensor = torch.tensor([loss_avg], dtype=torch.float32, device=device)
+        dist.all_reduce(total_loss_tensor, op=dist.ReduceOp.SUM)
+        loss_avg = total_loss_tensor.item() / WORLD_SIZE
 
         ###Check some condition to determine whether to save the best model
         output_dict = {}
         output_dict["m_true"] = np.concatenate(targets)
         output_dict["m_pred"] = np.concatenate(outputs)
         global_rank = dist.get_rank()
-        os.makedirs(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_'+ timestr+f'_GPUS_{WORLD_SIZE}'+f'/valid_data_epoch_{epoch}/',exist_ok=True)
-        with open(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_'+ timestr+f'_GPUS_{WORLD_SIZE}'+f'/valid_data_epoch_{epoch}/'+f'Inference_data_valid_rank_{global_rank}_epoch_{epoch}.pkl', "wb") as outfile:
+        os.makedirs(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}_Nodes_{WORLD_SIZE/4}/{decay}_'+ timestr+f'_GPUS_{WORLD_SIZE}'+f'/valid_data_epoch_{epoch}/',exist_ok=True)
+        with open(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}_Nodes_{WORLD_SIZE/4}/{decay}_'+ timestr+f'_GPUS_{WORLD_SIZE}'+f'/valid_data_epoch_{epoch}/'+f'Inference_data_valid_rank_{global_rank}_epoch_{epoch}.pkl', "wb") as outfile:
               pickle.dump(output_dict, outfile, protocol=2)
 
         # dist.barrier()
@@ -246,7 +164,7 @@ def main():
         if GLOBAL_RANK == 0: 
             print("best_epoch  ", best_epoch)
 
-        model_to_load = glob.glob(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr+ f'_GPUS_{WORLD_SIZE}'+'/Models'+ f'/ckpt_{best_epoch}.pt')[0]
+        model_to_load = glob.glob(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}_Nodes_{WORLD_SIZE/4}/{decay}_' + timestr+ f'_GPUS_{WORLD_SIZE}'+'/Models'+ f'/ckpt_{best_epoch}.pt')[0]
         
         old_checkpoint = torch.load(model_to_load)
         if GLOBAL_RANK == 0: print("---------> Loaded Best Model---",model_to_load)
@@ -261,51 +179,161 @@ def main():
             for i, sample in enumerate(test_loader):
                 if args.cuda:
                     data, target = sample[0].to(device), sample[1].to(device)
-                target = transform_norm_y(target, mean_, std_)
+                target = transform_norm_y(target, mass_mean, mass_std)
                 output = ddp_model(data)
                 loss = criterion(output, target)
                 loss_avg += loss.item()
-                outputs.append(inv_transform_norm_y(output, mean_, std_).detach().cpu().numpy())
-                targets.append(inv_transform_norm_y(target, mean_, std_).detach().cpu().numpy())
+                outputs.append(inv_transform_norm_y(output, mass_mean, mass_std).detach().cpu().numpy())
+                targets.append(inv_transform_norm_y(target, mass_mean, mass_std).detach().cpu().numpy())
 
 
 
                 if (i % 50 == 0) and (GLOBAL_RANK == 0):
                     print(f"Test  :  {i + 1}/{len(test_loader)}  Loss:  {loss_avg/(i+1)}")
-
-
-                    # if WandB_: wandb.log({"valid_loss": loss_avg/(i+1)})
+                    if WandB_ : wandb.log({"test_loss": loss_avg/(i+1)})
 
             global_rank = dist.get_rank()
             output_dict = {}
             output_dict["m_true"] = np.concatenate(targets)
             output_dict["m_pred"] = np.concatenate(outputs)
             global_rank = dist.get_rank()
-            os.makedirs(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr+f'_GPUS_{WORLD_SIZE}'+ f'/test_data_epoch_{best_epoch}/',exist_ok=True)
-            with open(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_'+timestr +f'_GPUS_{WORLD_SIZE}'+ f'/test_data_epoch_{best_epoch}/'+f'/Inference_data_test_rank_{global_rank}_epoch_{best_epoch}_M3p7.pkl', "wb") as outfile:
+            os.makedirs(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}_Nodes_{WORLD_SIZE/4}/{decay}_' + timestr+f'_GPUS_{WORLD_SIZE}'+ f'/test_data_epoch_{best_epoch}/',exist_ok=True)
+            with open(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}_Nodes_{WORLD_SIZE/4}/{decay}_'+timestr +f'_GPUS_{WORLD_SIZE}'+ f'/test_data_epoch_{best_epoch}/'+f'/Inference_data_test_rank_{global_rank}_epoch_{best_epoch}_M3p7.pkl', "wb") as outfile:
                 pickle.dump(output_dict, outfile, protocol=2)
-            with open(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr+f'_GPUS_{WORLD_SIZE}' + f'/output_file_globalrank_{global_rank}_epoch_{best_epoch}.txt', 'a') as w:
+            with open(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}_Nodes_{WORLD_SIZE/4}/{decay}_' + timestr+f'_GPUS_{WORLD_SIZE}' + f'/output_file_globalrank_{global_rank}_epoch_{best_epoch}.txt', 'a') as w:
                 w.write('Model: ' + model_to_load + ' \n')
                 # w.write('Acc: %f \n', accuracy)
                 w.write('Loss:  ' + f"{loss_avg/(i+1)}"+ ' \n')
                 w.write('Numsamples: ' + f"{len(test_loader) // WORLD_SIZE // args.batch_size * WORLD_SIZE * args.batch_size}")
-        print("------End testing-----")
+            if GLOBAL_RANK == 0: print("------End testing-----")
+
+    sync_file = _get_sync_file()
+
+    dist.init_process_group(backend=args.backend, world_size=WORLD_SIZE, rank=GLOBAL_RANK, init_method=sync_file)
+
+    if GLOBAL_RANK==0:
+        print(f"Total channel in this training # {len(indices)} :-> ",layers_names)
+        if args.timestr is None:
+            timestr = time.strftime("%Y_%m_%d_%H:%M:%S")###Get the current time to identify different models
+        else:
+            timestr = args.timestr
+
+        timestr_tensor = torch.tensor(list(timestr.encode('utf-8')), dtype=torch.uint8).to(device)
+    else:
+        timestr_tensor = torch.empty(len(time.strftime("%Y_%m_%d_%H:%M:%S")), dtype=torch.uint8).to(device)
+    dist.broadcast(timestr_tensor, src=0)
+    timestr = timestr_tensor.cpu().numpy().tobytes().decode('utf-8')
+    print('timestamp: ' + timestr)
+
+    args.cuda = not args.no_cuda and torch.cuda.is_available()
 
 
+    set_random_seeds(random_seed=args.seed)
+
+    ###Drop in your train, validation, and test datasets of type Dataset
+    ###The drop_last=True is necessary to ensure each gpu sees the same amount of data
+
+    file_train = glob.glob(f'{data_path}/*train*')[0]
+    file_valid = glob.glob(f'{data_path}/*valid*')[0]
+   
+
+    train_dset = RegressionDataset(file_train, preload_size=BATCH_SIZE)
+    valid_dset = RegressionDataset(file_valid, preload_size=BATCH_SIZE)
+    
+    n_total_train = len(train_dset)
+    n_total_valid = len(valid_dset)
+    
+
+    if n_train != -1:
+        train_indices = list(range(n_train))
+        random.shuffle(train_indices)
+    else:
+        train_indices = list(range(n_total_train))
+        random.shuffle(train_indices)
+
+    if n_valid !=-1:
+        valid_indices = list(range(n_valid))
+        random.shuffle(valid_indices)
+    else:
+        valid_indices = list(range(n_total_valid))
+        random.shuffle(valid_indices)
+
+    
+    
+
+    train_sampler = ChunkedDistributedSampler(train_indices, chunk_size=BATCH_SIZE, shuffle=True, num_replicas=None, rank=None)
+    train_loader = DataLoader(train_dset, batch_size=BATCH_SIZE, sampler=train_sampler, pin_memory=True, num_workers=args.num_workers, drop_last=True)
+
+    val_sampler = ChunkedDistributedSampler(valid_indices, chunk_size=BATCH_SIZE, shuffle=False, num_replicas=None, rank=None)
+    val_loader = DataLoader(valid_dset, batch_size=BATCH_SIZE, sampler=val_sampler, pin_memory=True, num_workers=args.num_workers, drop_last=True)
+   
+    if GLOBAL_RANK==0:
+        print("Number of train sets  :  ", n_total_train, "   used train sets:  ", len(train_indices),"---->", (len(train_indices)/n_total_train)*100,"%")
+        print("Number of val sets    :  ", n_total_valid, "   used valid sets:  ", len(valid_indices),"---->", (len(valid_indices)/n_total_valid)*100,"%")
+        
+    # criterion = nn.BCEWithLogitsLoss().to(device)
+    criterion = nn.MSELoss().to(device)
+
+    model = resnet34_modified(input_channels=len(indices), num_classes=1)
+    # model = ModifiedResNet(resnet_='resnet18',input_channels=len(indices))
+    model = model.to(device)
+
+    ddp_model = nn.parallel.DistributedDataParallel(model, device_ids=[device], output_device=device)
+
+
+    if args.resume_epoch_num !=0:
+        model_to_load = glob.glob(f"{os.environ['SCRATCH']}/{args.checkpoint_folder}_Nodes_{WORLD_SIZE/4}/{decay}_*/Models/ckpt_{args.resume_epoch_num}.pt")[0]
+        old_checkpoint = torch.load(model_to_load)
+        if GLOBAL_RANK == 0: print("---------> Loaded pretrained Model---",model_to_load)
+        ddp_model.load_state_dict(old_checkpoint['model_state_dict'])
+
+
+    ###Can replace with optimizer of your choice
+    optimizer = torch.optim.Adam(ddp_model.parameters(),
+                                 lr=args.base_lr*WORLD_SIZE,
+                                 eps=args.epsilon,
+                                )
+    
+    ###This part determines the appropriate number of batches per epoch.
+    ###Each gpu will see the same amount of data between using this and using drop_last=True in the loaders
+    num_batches_per_epoch = len(train_loader.dataset) // WORLD_SIZE // args.batch_size
+    scheduler = WarmupScheduler(optimizer, warmup_epochs=args.warmup, total_epochs=args.epochs,
+                                num_batches_per_epoch=num_batches_per_epoch)
+ 
     if GLOBAL_RANK == 0: print('---------------------------------Start Training----------------------------')
     ###Drop in your loss function
 
     ###Get your best epoch after training so you can use it to load the appropriate model for testing
     best_epoch = train(args.epochs, optimizer, WandB_ )
-    global_rank = dist.get_rank()
-    if GLOBAL_RANK == 0: print(f"best_epoch before synchronization global_rank--{global_rank}------------",best_epoch)
-    
+    # global_rank = dist.get_rank()
+    if GLOBAL_RANK == 0: 
+        print(f"best_epoch before synchronization global_rank--{GLOBAL_RANK}------------",best_epoch)
+        best_epoch_tensor = torch.tensor(best_epoch, dtype=torch.int).to(device)
+    else:
+        best_epoch_tensor = best_epoch = torch.tensor(0, dtype=torch.int).to(device)
+
+    dist.broadcast(best_epoch_tensor, src=0)
+    best_epoch = best_epoch_tensor.item()
+
     if run_test:
         if GLOBAL_RANK == 0: print('-------------Starting Testing----------------')
+        file_test = glob.glob(f'{test_data_path}/*M3p7*')[0]
+        test_dset = RegressionDataset(file_test, preload_size=BATCH_SIZE)
+        n_total_test = len(test_dset)
+        if n_test !=-1:
+            test_indices = list(range(n_test))
+            random.shuffle(test_indices)
+        else:
+            test_indices = list(range(n_total_test))
+            random.shuffle(test_indices)
+
+        test_sampler = ChunkedDistributedSampler(test_indices, chunk_size=BATCH_SIZE, shuffle=False, num_replicas=None, rank=None)
+        test_loader = DataLoader(test_dset, batch_size=BATCH_SIZE, sampler=test_sampler, pin_memory=True, num_workers=args.num_workers, drop_last=True)
+        if GLOBAL_RANK==0: print("Number of test sets  :  ", n_total_test, "  used test sets:  ", len(test_indices),"---->", (len(test_indices)/n_total_test)*100,"%")
         
         test(best_epoch, device, WORLD_SIZE, WandB_)
 
-    sys.exit()
+   
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -346,8 +374,10 @@ if __name__ == '__main__':
     parser.add_argument('--m0_scale', type=float, default=17.2)
     parser.add_argument('-b', '--resblocks',  default=2,     type=int, help='Number of residual blocks.')
     parser.add_argument('-ch','--channels', nargs='+', type=int, default=[0,1,2,3,4,5,6,7,8,9,10,11,12], help='List of channels used')
-    parser.add_argument('--WandB', type=bool, default=False, help='flag for wandb')
-    parser.add_argument('--run_test', type=bool, default=False, help='flag for running test on signal samples')
+    parser.add_argument('--WandB', action='store_true', help='flag for wandb')
+    parser.add_argument('--run_test', action='store_true', help='flag for running test on signal samples')
+    parser.add_argument('--mean', type=float, default=8.893934)
+    parser.add_argument('--std' , type=float, default=2.7809753)
     args = parser.parse_args()
 
     BATCH_SIZE = args.batch_size
@@ -359,8 +389,9 @@ if __name__ == '__main__':
     test_data_path = args.test_data_path
     WandB_ = args.WandB
     run_test = args.run_test
+    mean_, std_ = args.mean, args.std    
     channel_list = ["Tracks_pt", "Tracks_dZSig", "Tracks_d0Sig", "ECAL_energy","HBHE_energy", "Pix_1", "Pix_2", "Pix_3", "Pix_4", "Tib_1", "Tib_2" ,"Tob_1", "Tob_2"]
-    mean_, std_ = 8.893934, 4.4611673
+    
     indices = args.channels # channel selected for training change it to class defination too
     channels_used = [channel_list[ch] for ch in indices]
     layers_names = ' | '.join(channels_used)
@@ -385,20 +416,21 @@ if __name__ == '__main__':
         print('GPU #', LOCAL_RANK, ' is down')
         sys.exit()
 
-    if GLOBAL_RANK==0:
-        print(f"Total channel in this training # {len(indices)} :-> ",layers_names)
-    if args.timestr is None:
-        timestr = time.strftime("%Y_%m_%d_%H_%M")###Get the current time to identify different models
-    else:
-        timestr = args.timestr
-    print('timestamp: ' + timestr)
-    m0_scale = torch.tensor(m0_scale)
+    
 
-    # if WandB_:
-        # wandb.login(key="51b58a76963008d6010f73edbd6d0617a772c9df")
-        # wandb.init(
-        #     project = f"Mass Regression using gpu {WORLD_SIZE}",
-        #     name = f"resnet34_modified_gpu_{WORLD_SIZE}"
-        # )
+    m0_scale = torch.tensor(m0_scale)
+    mass_mean = torch.tensor(mean_)
+    mass_std= torch.tensor(std_)
+
+
+    
+    if WandB_ and GLOBAL_RANK == 0:
+        # Use you own key otherwise it mess mine 
+        wandb.login(key="51b58a76963008d6010f73edbd6d0617a772c9df")
+        wandb.init(
+            project = f"Mass Regression using  {WORLD_SIZE/4} nodes Test",
+            name = f"resnet34_modified_gpu_{WORLD_SIZE}"
+        )
     main()
-    # if WandB_: wandb.finish()
+    if WandB_ and GLOBAL_RANK == 0: wandb.finish()
+    sys.exit()
