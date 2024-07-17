@@ -2,7 +2,8 @@ import numpy as np
 import os, glob, random, time, sys, pickle, glob, h5py
 import argparse
 import pyarrow.parquet as pq
-from resnet import *
+# from resnet import *
+from regression_Models import *
 import torch
 from torch import distributed as dist
 # from torch.utils.data.distributed import DistributedSampler
@@ -274,8 +275,10 @@ def main():
     # criterion = nn.BCEWithLogitsLoss().to(device)
     criterion = nn.MSELoss().to(device)
 
-    model = resnet34_modified(input_channels=len(indices), num_classes=1)
-    # model = ModifiedResNet(resnet_='resnet18',input_channels=len(indices))
+    # model = resnet34_modified(input_channels=len(indices), num_classes=1)
+    # model = ModifiedResNet(input_channels=len(indices), resnet_='resnet18')
+    model = EfficientNet(in_channels=len(indices), effnet=0)
+    # model = resnet_all(in_channels=len(indices), resnetX='resnet18')
     model = model.to(device)
 
     ddp_model = nn.parallel.DistributedDataParallel(model, device_ids=[device], output_device=device)
@@ -428,7 +431,7 @@ if __name__ == '__main__':
         # Use you own key otherwise it mess mine 
         wandb.login(key="51b58a76963008d6010f73edbd6d0617a772c9df")
         wandb.init(
-            project = f"Mass Regression using  {WORLD_SIZE/4} nodes Test",
+            project = f"Mass Regression using  {WORLD_SIZE/4} nodes",
             name = f"resnet34_modified_gpu_{WORLD_SIZE}"
         )
     main()
