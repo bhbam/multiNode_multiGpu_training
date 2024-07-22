@@ -88,12 +88,6 @@ def main():
                 output = ddp_model(data)
                 loss = criterion(output, target)
                 loss.backward()
-
-                for param in ddp_model.parameters():
-                    if param.grad is not None:
-                        dist.all_reduce(param.grad.data, op=dist.ReduceOp.SUM)
-                        param.grad.data /= WORLD_SIZE
-
                 grads = gradfilter_ema(ddp_model, grads=grads, alpha=alpha, lamb=lamb)
                 loss_avg += loss.item()
                 optimizer.step()
@@ -277,8 +271,9 @@ def main():
 
     # model = resnet34_modified(input_channels=len(indices), num_classes=1)
     # model = ModifiedResNet(input_channels=len(indices), resnet_='resnet18')
-    model = EfficientNet(in_channels=len(indices), effnet=0)
-    # model = resnet_all(in_channels=len(indices), resnetX='resnet18')
+    # model = EfficientNet(in_channels=len(indices), effnet=0)
+    model = resnet_all(in_channels=len(indices), resnetX='resnet18')
+    # model = CustomCoAtNet(in_channels=len(indices), coatnet='coatnet_0_224')
     model = model.to(device)
 
     ddp_model = nn.parallel.DistributedDataParallel(model, device_ids=[device], output_device=device)
