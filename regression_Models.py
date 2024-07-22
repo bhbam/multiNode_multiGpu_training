@@ -17,9 +17,9 @@ import torch.hub
 import torch.nn.functional as F
 import timm
 
+#-------------------------------------------------------------------------------------
 
-
-
+#create efficientNet model
 def EfficientNet(in_channels=13, effnet=0 ):
 
     # Create EfficientNet model
@@ -35,7 +35,10 @@ def EfficientNet(in_channels=13, effnet=0 ):
 
     return model
 
-
+# model = EfficientNet(in_channels=len(indices), effnet=0)
+   
+#-------------------------------------------------------------------------------------
+#create resnet model
 def resnet_all(in_channels=13, resnetX='resnet18'):
     model = timm.create_model(f'{resnetX}')
 
@@ -45,3 +48,28 @@ def resnet_all(in_channels=13, resnetX='resnet18'):
     model.fc = nn.Linear(model.fc.in_features, 1)
 
     return model
+# model = resnet_all(in_channels=len(indices), resnetX='resnet18')
+
+#-------------------------------------------------------------------------------------
+
+# Create  CoAtNet model
+class CustomCoAtNet(nn.Module):
+    def __init__(self, in_channels=13, coatnet='coatnet_0_224'):
+        super(CustomCoAtNet, self).__init__()
+        self.model = timm.create_model(f'{coatnet}')
+        
+        # Modify the stem layer to accept `in_channels`
+        self.model.stem.conv1 = nn.Conv2d(in_channels, self.model.stem.conv1.out_channels, kernel_size=self.model.stem.conv1.kernel_size,
+                                          stride=self.model.stem.conv1.stride, padding=self.model.stem.conv1.padding, bias=False)
+        
+        # Modify the final layer for regression
+        self.model.head.fc = nn.Linear(self.model.head.fc.in_features, 1)
+
+    def forward(self, x):
+        # Resize the input tensor to (224, 224) within the forward method
+        x = F.interpolate(x, size=(224, 224), mode='bilinear')
+        return self.model(x)
+
+# model = CustomCoAtNet(in_channels=13, coatnet='coatnet_0_224')
+
+#-------------------------------------------------------------------------------------
