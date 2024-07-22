@@ -165,7 +165,7 @@ def main():
  
    
    
-    if GLOBAL_RANK == 0: print('-------------Starting Testing----------------')
+    if GLOBAL_RANK == 0: print(f'-------------Starting Testing-----Mass {Mass}-----------')
     
     test(best_epoch, device, WORLD_SIZE, final_model)
 
