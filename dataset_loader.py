@@ -2,7 +2,6 @@ import torch, h5py, random
 from torch.utils.data import *
 import pyarrow.parquet as pq
 import math
-
 '''mass transformation function: converted to network unit'''
 
 def transform_y(y, m0_scale):
@@ -82,7 +81,7 @@ class ChunkedDistributedSampler(Sampler):
         self.data_source = data_source
         self.chunk_size = chunk_size
         self.num_chunks = len(data_source) // chunk_size
-        self.indices = list(range(len(data_source)))
+        self.indices = sorted(data_source)
         self.shuffle = shuffle
         self.num_replicas = num_replicas if num_replicas is not None else torch.distributed.get_world_size()
         self.rank = rank if rank is not None else torch.distributed.get_rank()
