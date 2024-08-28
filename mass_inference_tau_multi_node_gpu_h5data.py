@@ -12,12 +12,9 @@ import torch.optim as optim
 # from torch.utils.data import Dataset, ConcatDataset
 
 from dataset_loader import *
+from regression_Models import *
 run_logger = True
 
-
-def wandb_update(flag):
-    if flag: import wandb
-    else: pass
 
 def logger(s):
     global f, run_logger
@@ -50,6 +47,7 @@ def main():
 
 
     def test(best_epoch, device, WORLD_SIZE, final_model):
+        
         if GLOBAL_RANK == 0: 
             print("best_epoch  ", best_epoch)
 
@@ -65,6 +63,7 @@ def main():
         with torch.no_grad():
         ###Drop in your test loop here but note that each GPU will report the test results independently
         ###if you construct the test loop the same way as train/val
+            start_time = time.time()
             for i, sample in enumerate(test_loader):
                 if args.cuda:
                     data, target = sample[0].to(device), sample[1].to(device)
@@ -85,15 +84,18 @@ def main():
             output_dict["m_true"] = np.concatenate(targets)
             output_dict["m_pred"] = np.concatenate(outputs)
             global_rank = dist.get_rank()
-            os.makedirs(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}_Nodes_{WORLD_SIZE/4}/{decay}_' + timestr+f'_GPUS_{WORLD_SIZE}'+ f'/test_data_epoch_{best_epoch}/',exist_ok=True)
-            with open(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}_Nodes_{WORLD_SIZE/4}/{decay}_'+timestr +f'_GPUS_{WORLD_SIZE}'+ f'/test_data_epoch_{best_epoch}/'+f'/Inference_data_test_rank_{global_rank}_epoch_{best_epoch}_M3p7.pkl', "wb") as outfile:
+            os.makedirs(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr+f'_GPUS_{WORLD_SIZE}'+ f'/test_data_epoch_{best_epoch}_M{Mass}/',exist_ok=True)
+            with open(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_'+timestr +f'_GPUS_{WORLD_SIZE}'+ f'/test_data_epoch_{best_epoch}_M{Mass}/'+f'/Inference_data_test_rank_{global_rank}_epoch_{best_epoch}_M{Mass}.pkl', "wb") as outfile:
                 pickle.dump(output_dict, outfile, protocol=2)
-            with open(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}_Nodes_{WORLD_SIZE/4}/{decay}_' + timestr+f'_GPUS_{WORLD_SIZE}' + f'/output_file_globalrank_{global_rank}_epoch_{best_epoch}.txt', 'a') as w:
+            with open(os.environ['SCRATCH'] + f'/{args.checkpoint_folder}/{decay}_' + timestr+f'_GPUS_{WORLD_SIZE}' + f'/output_file_globalrank_{global_rank}_epoch_{best_epoch}_M{Mass}.txt', 'a') as w:
                 w.write('Model: ' + model_to_load + ' \n')
                 # w.write('Acc: %f \n', accuracy)
                 w.write('Loss:  ' + f"{loss_avg/(i+1)}"+ ' \n')
                 w.write('Numsamples: ' + f"{len(test_loader) // WORLD_SIZE // args.batch_size * WORLD_SIZE * args.batch_size}")
-            if GLOBAL_RANK == 0: print("------End testing-----")
+            end_time = time.time()
+            if GLOBAL_RANK == 0: 
+                print("Time taken for testing :  ", np.round(end_time - start_time, 2))
+                print(f"------End testing-----Mass  {Mass}")
     sync_file = _get_sync_file()
 
     dist.init_process_group(backend=args.backend, world_size=WORLD_SIZE, rank=GLOBAL_RANK, init_method=sync_file)
@@ -148,11 +150,11 @@ def main():
     # criterion = nn.BCEWithLogitsLoss().to(device)
     criterion = nn.MSELoss().to(device)
 
-    model = resnet34_modified(input_channels=len(indices), num_classes=1)
+    model = ResNet(len(indices), resblocks, [8,16,32,64])
     # model = ModifiedResNet(resnet_='resnet18',input_channels=len(indices))
     model = model.to(device)
+    ddp_model = nn.parallel.DistributedDataParallel(model, device_ids=[device], output_device=device, find_unused_parameters=True)
 
-    ddp_model = nn.parallel.DistributedDataParallel(model, device_ids=[device], output_device=device)
     final_model_dir = args.final_model_dir
     final_model = f"{final_model_dir}/ckpt_{best_epoch}.pt"
 
@@ -179,7 +181,7 @@ if __name__ == '__main__':
                         help='best epoch to test model')
     parser.add_argument('--final_model_dir', default='/pscratch/sd/b/bbbam/resnet34_modi_final_Nodes_4.0/13_channels_massregressor_multi_node_2024_07_15_12_30_GPUS_16/Models', 
                         help='final test model')
-    parser.add_argument('--test_data_path', default='/pscratch/sd/b/bbbam/signal_with_trigger_normalized_h5', 
+    parser.add_argument('--test_data_path', default='/pscratch/sd/b/bbbam/IMG_v3_signal_with_trigger_normalized_h5', 
                         help='log directory')
     parser.add_argument('--batch_size', type=int, default=1024, ###With DDP, set this as high as possible
                         help='input batch size for training')
@@ -198,10 +200,10 @@ if __name__ == '__main__':
     parser.add_argument('--mass', type=str, default='3p7', help="select signal mass from 3p7,4,5,6,8,10,12 and 14")
     parser.add_argument('--num_workers', type=int, default=32)
     parser.add_argument('--m0_scale', type=float, default=17.2)
-    parser.add_argument('-b', '--resblocks',  default=2,     type=int, help='Number of residual blocks.')
+    parser.add_argument('-b', '--resblocks',  default=3,     type=int, help='Number of residual blocks.')
     parser.add_argument('-ch','--channels', nargs='+', type=int, default=[0,1,2,3,4,5,6,7,8,9,10,11,12], help='List of channels used')
-    parser.add_argument('--mean', type=float, default=8.893934)
-    parser.add_argument('--std' , type=float, default=2.7809753)
+    parser.add_argument('--mean', type=float, default=9.182514)
+    parser.add_argument('--std' , type=float, default=4.5799513)
     args = parser.parse_args()
 
     BATCH_SIZE = args.batch_size
@@ -209,6 +211,7 @@ if __name__ == '__main__':
     m0_scale = args.m0_scale
     Mass = args.mass
     test_data_path = args.test_data_path
+    resblocks = args.resblocks
     n_test = args.n_test
     mean_, std_ = args.mean, args.std    
     channel_list = ["Tracks_pt", "Tracks_dZSig", "Tracks_d0Sig", "ECAL_energy","HBHE_energy", "Pix_1", "Pix_2", "Pix_3", "Pix_4", "Tib_1", "Tib_2" ,"Tob_1", "Tob_2"]
