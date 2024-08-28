@@ -2,8 +2,7 @@ import numpy as np
 import os, glob, random, time, sys, pickle, glob, h5py
 import argparse
 import pyarrow.parquet as pq
-# from resnet import *
-from regression_Models import *
+from torch_resnet_concat import *
 import torch
 from torch import distributed as dist
 # from torch.utils.data.distributed import DistributedSampler
@@ -84,11 +83,13 @@ def main():
             start_time = time.time()
             for i, sample in enumerate(train_loader):
                 if args.cuda:
-                    data, target = sample[0].to(device), sample[1].to(device)
+                    data, target, iphi, ieta = sample[0].to(device), sample[1].to(device), sample[2].to(device), sample[3].to(device)
                 with torch.no_grad():
                     target = transform_norm_y(target, mass_mean, mass_std)
+                    iphi = iphi/360.
+                    ieta = ieta/140.
                 optimizer.zero_grad()
-                output = ddp_model(data)
+                output = ddp_model([data, iphi, ieta])
                 loss = criterion(output, target)
                 loss.backward()
                 if grock: grads = gradfilter_ema(ddp_model, grads=grads, alpha=alpha, lamb=lamb)
@@ -125,9 +126,11 @@ def main():
         with torch.no_grad():
             for i, sample in enumerate(val_loader):
                 if args.cuda:
-                    data, target = sample[0].to(device), sample[1].to(device)
+                    data, target, iphi, ieta = sample[0].to(device), sample[1].to(device), sample[2].to(device), sample[3].to(device)
                 target = transform_norm_y(target, mass_mean, mass_std)
-                output = ddp_model(data)
+                iphi = iphi/360.
+                ieta = ieta/140.
+                output = ddp_model([data, iphi, ieta])
                 loss = criterion(output, target)
                 loss_avg += loss.item()
                 if (i % 50 == 0) and (GLOBAL_RANK == 0):
@@ -177,9 +180,11 @@ def main():
         ###if you construct the test loop the same way as train/val
             for i, sample in enumerate(test_loader):
                 if args.cuda:
-                    data, target = sample[0].to(device), sample[1].to(device)
+                    data, target, iphi, ieta = sample[0].to(device), sample[1].to(device), sample[2].to(device), sample[3].to(device)
                 target = transform_norm_y(target, mass_mean, mass_std)
-                output = ddp_model(data)
+                iphi = iphi/360.
+                ieta = ieta/140.
+                output = ddp_model([data, iphi, ieta])
                 loss = criterion(output, target)
                 loss_avg += loss.item()
                 outputs.append(inv_transform_norm_y(output, mass_mean, mass_std).detach().cpu().numpy())
@@ -298,10 +303,11 @@ def main():
 
     # model = resnet34_modified(input_channels=len(indices), num_classes=1)
     # model = ModifiedResNet(input_channels=len(indices), resnet_='resnet18')
-    model = EfficientNet(in_channels=len(indices), effnet=args.resblocks)
+    # model = EfficientNet(in_channels=len(indices), effnet=args.resblocks)
     # model = resnet_all(in_channels=len(indices), resnetX='resnet18')
     # model = ResNet(len(indices), args.resblocks, [8,16,32,64])
     # model = CustomCoAtNet(in_channels=len(indices), coatnet='coatnet_0_224')
+    model = ResNet(len(indices), args.resblocks, [8,16,32,64])
     model = model.to(device)
 
     ddp_model = nn.parallel.DistributedDataParallel(model, device_ids=[device], output_device=device, find_unused_parameters=True)
@@ -469,7 +475,7 @@ if __name__ == '__main__':
         # Use you own key otherwise it mess mine 
         wandb.login(key="51b58a76963008d6010f73edbd6d0617a772c9df")
         wandb.init(
-            project = f"Mass Regression with EffNet  {WORLD_SIZE/4} nodes",
+            project = f"Mass Regression with ResNet with ieta iphi  {WORLD_SIZE/4} nodes",
             name = f"{model_name}_gpu_{WORLD_SIZE}_{timestr_wb}"
         )
     main()
