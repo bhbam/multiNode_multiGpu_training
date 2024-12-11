@@ -307,6 +307,7 @@ def main():
     # model = resnet_all(in_channels=len(indices), resnetX='resnet18')
     # model = ResNet(len(indices), args.resblocks, [8,16,32,64])
     # model = CustomCoAtNet(in_channels=len(indices), coatnet='coatnet_0_224')
+    # model = ResNet(len(indices), args.resblocks, [8,16,32,64])
     model = ResNet(len(indices), args.resblocks, [8,16,32,64])
     model = model.to(device)
 
@@ -378,9 +379,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--log_dir', default='', ###Replace with your log dir
                         help='log directory')
-    parser.add_argument('--data_path', default='/pscratch/sd/b/bbbam/IMG_aToTauTau_masregression_samples_m1p2To17p2_combined_normalized', 
+    parser.add_argument('--data_path', default='/pscratch/sd/b/bbbam/IMG_aToTauTau_m1p2T018_combined_normalized_h5', 
                         help='log directory')
-    parser.add_argument('--test_data_path', default='/pscratch/sd/b/bbbam/IMG_v3_signal_with_trigger_normalized_h5', 
+    parser.add_argument('--test_data_path', default='/pscratch/sd/b/bbbam/run3_IMG_aToHToAATo4Tau_signal_combined_normalized', 
                         help='log directory')
     parser.add_argument('--batch_size', type=int, default=1024, ###With DDP, set this as high as possible
                         help='input batch size for training')
@@ -416,8 +417,8 @@ if __name__ == '__main__':
     parser.add_argument('--WandB', action='store_true', help='flag for wandb')
     parser.add_argument('--run_test', action='store_true', help='flag for running test on signal samples')
     parser.add_argument('--grock', action='store_true', help='flag for running grockfast')
-    parser.add_argument('--mean', type=float, default=9.182514)
-    parser.add_argument('--std' , type=float, default=4.5799513)
+    parser.add_argument('--mean', type=float, default=9.611417770385742)
+    parser.add_argument('--std' , type=float, default=4.844752788543701)
     parser.add_argument('--model_name', type=str, default='ResNet', help='Name of Model ')
     args = parser.parse_args()
 

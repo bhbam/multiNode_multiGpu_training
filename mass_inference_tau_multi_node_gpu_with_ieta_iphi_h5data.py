@@ -152,8 +152,8 @@ def main():
     # criterion = nn.BCEWithLogitsLoss().to(device)
     criterion = nn.MSELoss().to(device)
 
-    # model = ResNet(len(indices), args.resblocks, [8,16,32,64])
-    model = ResNet_BN(len(indices), args.resblocks, [8,16,32,64])
+    model = ResNet(len(indices), args.resblocks, [8,16,32,64])
+    # model = ResNet_BN(len(indices), args.resblocks, [8,16,32,64])
     model = model.to(device)
     ddp_model = nn.parallel.DistributedDataParallel(model, device_ids=[device], output_device=device, find_unused_parameters=True)
 
@@ -204,8 +204,8 @@ if __name__ == '__main__':
     parser.add_argument('--m0_scale', type=float, default=17.2)
     parser.add_argument('-b', '--resblocks',  default=3,     type=int, help='Number of residual blocks.')
     parser.add_argument('-ch','--channels', nargs='+', type=int, default=[0,1,2,3,4,5,6,7,8,9,10,11,12], help='List of channels used')
-    parser.add_argument('--mean', type=float, default=9.182514)
-    parser.add_argument('--std' , type=float, default=4.5799513)
+    parser.add_argument('--mean', type=float, default=9.611417770385742)
+    parser.add_argument('--std' , type=float, default=4.844752788543701)
     args = parser.parse_args()
 
     BATCH_SIZE = args.batch_size

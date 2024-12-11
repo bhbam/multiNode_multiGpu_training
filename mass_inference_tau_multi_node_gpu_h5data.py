@@ -2,7 +2,7 @@ import numpy as np
 import os, glob, random, time, sys, pickle, glob, h5py
 import argparse
 import pyarrow.parquet as pq
-from resnet import *
+from torch_resnet_concat import *
 import torch
 from torch import distributed as dist
 # from torch.utils.data.distributed import DistributedSampler
@@ -13,6 +13,8 @@ import torch.optim as optim
 
 from dataset_loader import *
 from regression_Models import *
+# from torch_resnet_concat import *
+from resnet import *
 run_logger = True
 
 
@@ -150,7 +152,7 @@ def main():
     # criterion = nn.BCEWithLogitsLoss().to(device)
     criterion = nn.MSELoss().to(device)
 
-    model = ResNet(len(indices), resblocks, [8,16,32,64])
+    model = ResNet_no_ieta_iphi(len(indices), resblocks, [8,16,32,64])
     # model = ModifiedResNet(resnet_='resnet18',input_channels=len(indices))
     model = model.to(device)
     ddp_model = nn.parallel.DistributedDataParallel(model, device_ids=[device], output_device=device, find_unused_parameters=True)
@@ -202,8 +204,8 @@ if __name__ == '__main__':
     parser.add_argument('--m0_scale', type=float, default=17.2)
     parser.add_argument('-b', '--resblocks',  default=3,     type=int, help='Number of residual blocks.')
     parser.add_argument('-ch','--channels', nargs='+', type=int, default=[0,1,2,3,4,5,6,7,8,9,10,11,12], help='List of channels used')
-    parser.add_argument('--mean', type=float, default=9.182514)
-    parser.add_argument('--std' , type=float, default=4.5799513)
+    parser.add_argument('--mean', type=float, default=9.611417770385742)
+    parser.add_argument('--std' , type=float, default=4.844752788543701)
     args = parser.parse_args()
 
     BATCH_SIZE = args.batch_size
