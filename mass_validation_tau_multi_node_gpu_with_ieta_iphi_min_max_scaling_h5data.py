@@ -12,9 +12,7 @@ import torch.optim as optim
 # from torch.utils.data import Dataset, ConcatDataset
 
 from dataset_loader import *
-# from regression_Models import *
-from torch_resnet_concat import *
-# from resnet import *
+from regression_Models import *
 run_logger = True
 
 
@@ -68,13 +66,15 @@ def main():
             start_time = time.time()
             for i, sample in enumerate(test_loader):
                 if args.cuda:
-                    data, target = sample[0].to(device), sample[1].to(device)
-                target = transform_norm_y(target, mass_mean, mass_std)
-                output = ddp_model(data)
+                    data, target, iphi, ieta = sample[0].to(device), sample[1].to(device), sample[2].to(device), sample[3].to(device)
+                target = transform_y(target,  m0_scale)
+                iphi = iphi/360.
+                ieta = ieta/140.
+                output = ddp_model([data, iphi, ieta])
                 loss = criterion(output, target)
                 loss_avg += loss.item()
-                outputs.append(inv_transform_norm_y(output, mass_mean, mass_std).detach().cpu().numpy())
-                targets.append(inv_transform_norm_y(target, mass_mean, mass_std).detach().cpu().numpy())
+                outputs.append(inv_transform_y(output,  m0_scale).detach().cpu().numpy())
+                targets.append(inv_transform_y(target,  m0_scale).detach().cpu().numpy())
 
 
 
@@ -123,9 +123,9 @@ def main():
     
 
     
-    file_test = glob.glob(f'{test_data_path}/*M{Mass}*')[0]
+    file_test = glob.glob(f'{test_data_path}/*mass_{Mass}*')[0]
 
-    test_dset = RegressionDataset(file_test, preload_size=BATCH_SIZE)
+    test_dset = RegressionDataset_with_min_max_scaling(file_test, preload_size=BATCH_SIZE)
     n_total_test = len(test_dset)
 
     
@@ -152,8 +152,8 @@ def main():
     # criterion = nn.BCEWithLogitsLoss().to(device)
     criterion = nn.MSELoss().to(device)
 
-    model = ResNet_no_ieta_iphi(len(indices), resblocks, [8,16,32,64])
-    # model = ModifiedResNet(resnet_='resnet18',input_channels=len(indices))
+    model = ResNet(len(indices), args.resblocks, [8,16,32,64])
+    # model = ResNet_BN(len(indices), args.resblocks, [8,16,32,64])
     model = model.to(device)
     ddp_model = nn.parallel.DistributedDataParallel(model, device_ids=[device], output_device=device, find_unused_parameters=True)
 
@@ -183,7 +183,7 @@ if __name__ == '__main__':
                         help='best epoch to test model')
     parser.add_argument('--final_model_dir', default='/pscratch/sd/b/bbbam/resnet34_modi_final_Nodes_4.0/13_channels_massregressor_multi_node_2024_07_15_12_30_GPUS_16/Models', 
                         help='final test model')
-    parser.add_argument('--test_data_path', default='/pscratch/sd/b/bbbam/IMG_v3_signal_with_trigger_normalized_h5', 
+    parser.add_argument('--test_data_path', default='/pscratch/sd/b/bbbam/signal_combined_from_ruchi_May_1_2025_h5_original_h5', 
                         help='log directory')
     parser.add_argument('--batch_size', type=int, default=1024, ###With DDP, set this as high as possible
                         help='input batch size for training')
@@ -201,7 +201,7 @@ if __name__ == '__main__':
     parser.add_argument('--timestr', type=str, default=None)
     parser.add_argument('--mass', type=str, default='3p7', help="select signal mass from 3p7,4,5,6,8,10,12 and 14")
     parser.add_argument('--num_workers', type=int, default=32)
-    parser.add_argument('--m0_scale', type=float, default=17.2)
+    parser.add_argument('--m0_scale', type=float, default=14)
     parser.add_argument('-b', '--resblocks',  default=3,     type=int, help='Number of residual blocks.')
     parser.add_argument('-ch','--channels', nargs='+', type=int, default=[0,1,2,3,4,5,6,7,8,9,10,11,12], help='List of channels used')
     parser.add_argument('--mean', type=float, default=9.611417770385742)

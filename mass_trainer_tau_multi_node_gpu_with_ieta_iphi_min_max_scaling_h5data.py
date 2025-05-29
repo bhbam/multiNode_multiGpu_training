@@ -85,7 +85,7 @@ def main():
                 if args.cuda:
                     data, target, iphi, ieta = sample[0].to(device), sample[1].to(device), sample[2].to(device), sample[3].to(device)
                 with torch.no_grad():
-                    target = transform_norm_y(target, mass_mean, mass_std)
+                    target = transform_y(target, m0_scale)
                     iphi = iphi/360.
                     ieta = ieta/140.
                 optimizer.zero_grad()
@@ -127,7 +127,7 @@ def main():
             for i, sample in enumerate(val_loader):
                 if args.cuda:
                     data, target, iphi, ieta = sample[0].to(device), sample[1].to(device), sample[2].to(device), sample[3].to(device)
-                target = transform_norm_y(target, mass_mean, mass_std)
+                target = transform_y(target, m0_scale)
                 iphi = iphi/360.
                 ieta = ieta/140.
                 output = ddp_model([data, iphi, ieta])
@@ -136,8 +136,8 @@ def main():
                 if (i % 50 == 0) and (GLOBAL_RANK == 0):
                     print(f"{epoch} Validation  :  {i + 1}/{len(val_loader)}  Loss:  {loss_avg/(i+1)}")
                     if WandB_: wandb.log({"valid_loss": loss_avg/(i+1)})
-                outputs.append(inv_transform_norm_y(output, mass_mean, mass_std).detach().cpu().numpy())
-                targets.append(inv_transform_norm_y(target, mass_mean, mass_std).detach().cpu().numpy())
+                outputs.append(inv_transform_y(output, m0_scale).detach().cpu().numpy())
+                targets.append(inv_transform_y(target, m0_scale).detach().cpu().numpy())
 
         # Collect loss across all devices
         total_loss_tensor = torch.tensor([loss_avg], dtype=torch.float32, device=device)
@@ -181,14 +181,14 @@ def main():
             for i, sample in enumerate(test_loader):
                 if args.cuda:
                     data, target, iphi, ieta = sample[0].to(device), sample[1].to(device), sample[2].to(device), sample[3].to(device)
-                target = transform_norm_y(target, mass_mean, mass_std)
+                target = transform_y(target, m0_scale)
                 iphi = iphi/360.
                 ieta = ieta/140.
                 output = ddp_model([data, iphi, ieta])
                 loss = criterion(output, target)
                 loss_avg += loss.item()
-                outputs.append(inv_transform_norm_y(output, mass_mean, mass_std).detach().cpu().numpy())
-                targets.append(inv_transform_norm_y(target, mass_mean, mass_std).detach().cpu().numpy())
+                outputs.append(inv_transform_y(output, m0_scale).detach().cpu().numpy())
+                targets.append(inv_transform_y(target, m0_scale).detach().cpu().numpy())
 
 
 
@@ -250,8 +250,8 @@ def main():
     file_valid = glob.glob(f'{data_path}/*valid*')[0]
    
 
-    train_dset = RegressionDataset(file_train, preload_size=CHUNK_SIZE)
-    valid_dset = RegressionDataset(file_valid, preload_size=CHUNK_SIZE)
+    train_dset = RegressionDataset_with_min_max_scaling(file_train, preload_size=CHUNK_SIZE)
+    valid_dset = RegressionDataset_with_min_max_scaling(file_valid, preload_size=CHUNK_SIZE)
     
     n_total_train = len(train_dset)
     n_total_valid = len(valid_dset)
@@ -352,7 +352,7 @@ def main():
     if run_test:
         if GLOBAL_RANK == 0: print('-------------Starting Testing----------------')
         file_test = glob.glob(f'{test_data_path}/*M3p7*')[0]
-        test_dset = RegressionDataset(file_test, preload_size=CHUNK_SIZE)
+        test_dset = RegressionDataset_with_min_max_scaling(file_test, preload_size=CHUNK_SIZE)
         n_total_test = len(test_dset)
         if n_test !=-1:
             test_indices = list(range(n_test))
@@ -381,7 +381,7 @@ if __name__ == '__main__':
                         help='log directory')
     parser.add_argument('--data_path', default='/pscratch/sd/b/bbbam/IMG_aToTauTau_Hadronic_with_Tau_decay_m0To18_pt30T0300_unbiased_normalised_combined_train_h5', 
                         help='log directory')
-    parser.add_argument('--test_data_path', default='/pscratch/sd/b/bbbam/run3_IMG_aToHToAATo4Tau_signal_combined_normalized', 
+    parser.add_argument('--test_data_path', default='/pscratch/sd/b/bbbam/signal_combined_from_ruchi_May_1_2025_h5_original_h5', 
                         help='log directory')
     parser.add_argument('--batch_size', type=int, default=1024, ###With DDP, set this as high as possible
                         help='input batch size for training')
@@ -411,7 +411,7 @@ if __name__ == '__main__':
     parser.add_argument('--timestr', type=str, default=None)
     parser.add_argument('--resume_epoch_num', type=int, default=0)
     parser.add_argument('--num_workers', type=int, default=32)
-    parser.add_argument('--m0_scale', type=float, default=17.2)
+    parser.add_argument('--m0_scale', type=float, default=14)
     parser.add_argument('-b', '--resblocks',  default=3,     type=int, help='Number of residual blocks. OR efficientnet X')
     parser.add_argument('-ch','--channels', nargs='+', type=int, default=[0,1,2,3,4,5,6,7,8,9,10,11,12], help='List of channels used')
     parser.add_argument('--WandB', action='store_true', help='flag for wandb')
@@ -419,6 +419,7 @@ if __name__ == '__main__':
     parser.add_argument('--grock', action='store_true', help='flag for running grockfast')
     parser.add_argument('--mean', type=float, default=9.611417770385742)
     parser.add_argument('--std' , type=float, default=4.844752788543701)
+    parser.add_argument('--mass_scale' , type=float, default=14.0)
     parser.add_argument('--model_name', type=str, default='ResNet', help='Name of Model ')
     args = parser.parse_args()
 
@@ -432,7 +433,7 @@ if __name__ == '__main__':
     WandB_ = args.WandB
     run_test = args.run_test
     grock = args.grock
-    mean_, std_ = args.mean, args.std  
+    mean_, std_ = args.mean, args.std
     model_name = args.model_name  
     channel_list = ["Tracks_pt", "Tracks_dZSig", "Tracks_d0Sig", "ECAL_energy","HBHE_energy", "Pix_1", "Pix_2", "Pix_3", "Pix_4", "Tib_1", "Tib_2" ,"Tob_1", "Tob_2"]
     
